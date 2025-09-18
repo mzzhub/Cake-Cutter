@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cake/Candy Cutter — MVP</title>
+  <style>
+    :root{--card-bg:#fff;--accent:#0b76ef}
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;display:flex;flex-direction:column;align-items:center;margin:0;padding:16px;background:#f6f8fb;color:#111}
+    h2{margin:4px 0 12px;font-weight:600}
+    #videoContainer{position:relative;width:100%;max-width:720px;background:#ddd;border-radius:10px;overflow:hidden}
+    video{display:block;width:100%;height:auto}
+    canvas#overlay{position:absolute;left:0;top:0;pointer-events:none}
+    .controls{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center}
+    .controls > *{background:var(--card-bg);border:1px solid #e3e7ee;padding:8px;border-radius:8px}
+    label{display:flex;align-items:center;gap:6px}
+    button{cursor:pointer}
+    .status{margin-top:10px;color:#444}
+    footer{margin-top:18px;font-size:13px;color:#666}
+    @media (max-width:420px){body{padding:10px}}
+  </style>
+</head>
+<body>
+  <h2>Cake/Candy Cutter — MVP</h2>
+
+  <div id="videoContainer">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn">Start Camera</button>
+    <button id="detectBtn">Detect Shape (Auto)</button>
+
+    <label>Shape
+      <select id="shapeSelect">
+        <option value="auto">Auto</option>
+        <option value="circle">Circle</option>
+        <option value="rect">Rectangle</option>
+      </select>
+    </label>
+
+    <label>Pieces
+      <input id="pieces" type="number" min="2" max="16" value="6" style="width:72px">
+    </label>
+
+    <button id="drawBtn">Draw Guide</button>
+  </div>
+
+  <div class="status"><strong>Status:</strong> <span id="status">Idle</span></div>
+  <footer>Notes: This is an MVP that runs in the browser. If `Auto` detection fails, choose <em>Circle</em> or <em>Rectangle</em> and click <em>Draw Guide</em>.</footer>
+
+  <!-- OpenCV.js (async) -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+
+  <script>
+    // --- Basic DOM refs ---
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('startBtn');
+    const detectBtn = document.getElementById('detectBtn');
+    const drawBtn = document.getElementById('drawBtn');
+    const shapeSelect = document.getElementById('shapeSelect');
+    const piecesInput = document.getElementById('pieces');
+    const statusSpan = document.getElementById('status');
+
+    // Hidden canvas used to capture frames for processing
+    const hiddenCanvas = document.createElement('canvas');
+    const hiddenCtx = hiddenCanvas.getContext('2d');
+    const ctx = overlay.getContext('2d');
+
+    let stream = null;
+    let cvReady = false;
+
+    function logStatus(msg){ statusSpan.textContent = msg; }
+
+    startBtn.addEventListener('click', startCamera);
+    detectBtn.addEventListener('click', () => runDetectionAndDraw(true));
+    drawBtn.addEventListener('click', () => runDetectionAndDraw(false));
+
+    // Attempt to start camera (mobile-friendly: use environment facing camera)
+    async function startCamera(){
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        video.srcObject = stream;
+        await video.play();
+        // set canvas sizes to match video natural size
+        resizeCanvases();
+        startBtn.disabled = true;
+        logStatus('Camera started');
+      }catch(err){
+        logStatus('Camera error: ' + err.message);
+        console.error(err);
+      }
+    }
+
+    function resizeCanvases(){
+      const w = video.videoWidth || video.clientWidth || 640;
+      const h = video.videoHeight || (w * 3/4);
+      overlay.width = w; overlay.height = h;
+      overlay.style.width = '100%';
+      hiddenCanvas.width = w; hiddenCanvas.height = h;
+      // clear overlay
+      ctx.clearRect(0,0,overlay.width,overlay.height);
+    }
+
+    window.addEventListener('resize', () => {
+      if (video && video.videoWidth) resizeCanvases();
+    });
+
+    // Called when OpenCV.js has loaded
+    function onOpenCvReady(){
+      cvReady = true;
+      console.log('OpenCV.js ready');
+      logStatus('OpenCV ready');
+    }
+
+    // Main function: either auto-detect shape or use manual selection
+    async function runDetectionAndDraw(autoDetect){
+      if (!video.srcObject){
+        logStatus('Start camera first');
+        return;
+      }
+      resizeCanvases();
+      const pieces = Math.max(2, Math.min(16, parseInt(piecesInput.value || '6')));
+
+      let chosen = shapeSelect.value;
+      if (autoDetect || chosen === 'auto'){
+        if (!cvReady){ logStatus('OpenCV not loaded yet'); return; }
+        logStatus('Detecting shape...');
+        const detection = await detectShape();
+        if (!detection){
+          logStatus('No object detected — try better lighting or switch to manual shape');
+          return;
+        }
+        chosen = detection.type === 'circle' ? 'circle' : (detection.type === 'rect' ? 'rect' : chosen);
+        drawGuide(chosen, detection, pieces);
+        logStatus('Detected: ' + (detection.type || 'unknown') + ' — drew guide for ' + pieces + ' pieces');
+      } else {
+        // manual
+        logStatus('Using manual shape: ' + chosen);
+        // We'll estimate a bounding box based on the video frame center for manual drawing
+        const defaultRect = {x: overlay.width*0.08, y: overlay.height*0.12, w: overlay.width*0.84, h: overlay.height*0.76};
+        const defaultCircle = {cx: overlay.width/2, cy: overlay.height/2, r: Math.min(overlay.width, overlay.height)/2 * 0.85};
+        const detection = chosen === 'circle' ? {type:'circle', center:{x:defaultCircle.cx,y:defaultCircle.cy}, radius:defaultCircle.r} : {type:'rect', rect:defaultRect};
+        drawGuide(chosen, detection, pieces);
+        logStatus('Drew manual ' + chosen + ' guide for ' + pieces + ' pieces');
+      }
+    }
+
+    // Draw overlay guides depending on shape
+    function drawGuide(shape, detection, pieces){
+      ctx.clearRect(0,0,overlay.width,overlay.height);
+      ctx.lineWidth = Math.max(2, Math.round(Math.min(overlay.width, overlay.height)/180));
+      ctx.strokeStyle = '#ff3b30';
+      ctx.fillStyle = 'rgba(255,59,48,0.06)';
+      ctx.beginPath();
+
+      if (shape === 'circle' && detection.center){
+        const cx = detection.center.x;
+        const cy = detection.center.y;
+        const r = detection.radius;
+        // circle boundary
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI*2);
+        ctx.fill();
+        ctx.stroke();
+        // radial lines
+        for (let i=0;i<pieces;i++){
+          const angle = (i * 2 * Math.PI) / pieces;
+          const x = cx + r * Math.cos(angle);
+          const y = cy + r * Math.sin(angle);
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(x, y);
+          ctx.stroke();
+        }
+      } else if (shape === 'rect' && detection.rect){
+        const r = detection.rect;
+        // rect border
+        ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.stroke();
+        // vertical slices (simple approach: divide along width into `pieces` equal columns)
+        for (let i=1;i<pieces;i++){
+          const x = r.x + (r.w * i / pieces);
+          ctx.beginPath(); ctx.moveTo(x, r.y); ctx.lineTo(x, r.y + r.h); ctx.stroke();
+        }
+      } else {
+        // nothing
+      }
+    }
+
+    // Shape detection using OpenCV.js - returns {type:'circle'|'rect', ...} or null
+    async function detectShape(){
+      try{
+        // capture current frame into hidden canvas
+        hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+        // create mats
+        let src = cv.imread(hiddenCanvas);
+        let gray = new cv.Mat();
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        cv.GaussianBlur(gray, gray, new cv.Size(5,5), 0);
+        let edges = new cv.Mat();
+        cv.Canny(gray, edges, 60, 150);
+
+        // find contours
+        let contours = new cv.MatVector();
+        let hierarchy = new cv.Mat();
+        cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+        let maxArea = 0;
+        let maxCnt = null;
+        for (let i = 0; i < contours.size(); ++i) {
+          let cnt = contours.get(i);
+          let area = cv.contourArea(cnt);
+          if (area > maxArea){ maxArea = area; maxCnt = cnt; }
+        }
+
+        if (!maxCnt || maxArea < 1000){
+          // cleanup
+          src.delete(); gray.delete(); edges.delete(); contours.delete(); hierarchy.delete();
+          return null;
+        }
+
+        // perimeter & approx
+        let peri = cv.arcLength(maxCnt, true);
+        let approx = new cv.Mat();
+        cv.approxPolyDP(maxCnt, approx, 0.02 * peri, true);
+
+        // decide if rectangle: approx has 4 points
+        if (approx.rows === 4){
+          const rect = cv.boundingRect(maxCnt);
+          // cleanup
+          src.delete(); gray.delete(); edges.delete(); contours.delete(); hierarchy.delete(); approx.delete();
+          return { type: 'rect', rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } };
+        }
+
+        // else check circularity
+        const area = maxArea;
+        const circularity = (4 * Math.PI * area) / (peri * peri);
+        if (circularity > 0.5){
+          // compute centroid
+          const m = cv.moments(maxCnt, false);
+          const cx = m.m10 / m.m00;
+          const cy = m.m01 / m.m00;
+          const radius = Math.min(hiddenCanvas.width, hiddenCanvas.height) * 0.5; // fallback
+          // we estimate radius from area
+          const estR = Math.sqrt(area / Math.PI);
+          src.delete(); gray.delete(); edges.delete(); contours.delete(); hierarchy.delete(); approx.delete();
+          return { type: 'circle', center: { x: cx, y: cy }, radius: estR };
+        }
+
+        // nothing reliable
+        src.delete(); gray.delete(); edges.delete(); contours.delete(); hierarchy.delete(); approx.delete();
+        return null;
+      }catch(err){
+        console.error('Detection error', err);
+        return null;
+      }
+    }
+
+    // Clean up camera when page is unloaded
+    window.addEventListener('beforeunload', ()=>{
+      if (stream){
+        stream.getTracks().forEach(t => t.stop());
+      }
+    });
+  </script>
+</body>
+</html>
