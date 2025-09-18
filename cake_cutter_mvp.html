@@ -24,7 +24,14 @@
   <h2>Cake/Candy Cutter — MVP</h2>
 
   <div id="videoContainer">
-    <video id="video" autoplay playsinline muted></video>
+    <video id="camera" autoplay playsinline></video>
+    <script>
+    navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+        document.getElementById("camera").srcObject = stream;
+        })
+        .catch(err => console.error("Camera error:", err));
+    </script>
     <canvas id="overlay"></canvas>
   </div>
 
