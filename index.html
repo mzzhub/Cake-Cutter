@@ -1,19 +1,619 @@
 <!DOCTYPE html>
 <html lang="en" class="dark">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎂</text></svg>" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Cake Cutter AR - Equal Portion AI Cutting Assistant</title>
-    <meta name="description" content="An AI-powered web app using browser-based computer vision (TensorFlow.js) to detect cakes, pizzas, donuts and draw exact AR portion lines live." />
-    
-    <!-- Preconnect Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
-  </head>
-  <body class="bg-slate-950 text-slate-100 font-sans antialiased overflow-x-hidden selection:bg-cyan-500 selection:text-black">
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Cake Cutter AR - Equal Portion AI Cutting Assistant</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎂</text></svg>" />
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            neon: { cyan: '#00f3ff', pink: '#ff007f', green: '#39ff14', yellow: '#ffe600', purple: '#b026ff' }
+          },
+          boxShadow: {
+            'neon-cyan': '0 0 15px rgba(0, 243, 255, 0.6), 0 0 30px rgba(0, 243, 255, 0.3)',
+            'neon-pink': '0 0 15px rgba(255, 0, 127, 0.6), 0 0 30px rgba(255, 0, 127, 0.3)',
+          },
+          animation: {
+            'scan': 'scanLine 3s ease-in-out infinite alternate',
+            'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite'
+          },
+          keyframes: {
+            scanLine: { '0%': { top: '0%' }, '100%': { top: '100%' } }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React 18 & ReactDOM CDN -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Babel Standalone for Browser JSX Compilation -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- TensorFlow.js & COCO-SSD Model CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    body { font-family: 'Inter', sans-serif; touch-action: manipulation; }
+    h1, h2, h3, h4 { font-family: 'Outfit', sans-serif; }
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .glass-panel-subtle {
+      background: rgba(30, 41, 59, 0.6);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen selection:bg-cyan-500 selection:text-black">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // Color themes for AR line drawing
+    const NEON_THEMES = {
+      cyan: { stroke: '#00f3ff', glow: 'rgba(0, 243, 255, 0.8)', fill: 'rgba(0, 243, 255, 0.12)' },
+      pink: { stroke: '#ff007f', glow: 'rgba(255, 0, 127, 0.8)', fill: 'rgba(255, 0, 127, 0.12)' },
+      green: { stroke: '#39ff14', glow: 'rgba(57, 255, 20, 0.8)', fill: 'rgba(57, 255, 20, 0.12)' },
+      yellow: { stroke: '#ffe600', glow: 'rgba(255, 230, 0, 0.8)', fill: 'rgba(255, 230, 0, 0.12)' },
+      purple: { stroke: '#b026ff', glow: 'rgba(176, 38, 255, 0.8)', fill: 'rgba(176, 38, 255, 0.12)' }
+    };
+
+    const FOOD_CLASSES = ['cake', 'pizza', 'donut', 'apple', 'orange', 'sandwich', 'bowl', 'dining table'];
+
+    function App() {
+      const [sliceCount, setSliceCount] = useState(6);
+      const [cutType, setCutType] = useState('radial'); // 'radial' | 'parallel' | 'grid'
+      const [themeKey, setThemeKey] = useState('cyan');
+      const [isCameraActive, setIsCameraActive] = useState(false);
+      const [isCameraLoading, setIsCameraLoading] = useState(false);
+      const [cameraError, setCameraError] = useState(null);
+      const [facingMode, setFacingMode] = useState('environment');
+      const [isTorchOn, setIsTorchOn] = useState(false);
+      const [isTorchSupported, setIsTorchSupported] = useState(false);
+      
+      const [model, setModel] = useState(null);
+      const [isModelLoading, setIsModelLoading] = useState(true);
+      const [detectedObject, setDetectedObject] = useState(null);
+      const [isLocked, setIsLocked] = useState(false);
+      const [manualBox, setManualBox] = useState(null);
+      const [isHelpOpen, setIsHelpOpen] = useState(false);
+
+      const videoRef = useRef(null);
+      const canvasRef = useRef(null);
+      const streamRef = useRef(null);
+      const requestRef = useRef(null);
+      const smoothedBBoxRef = useRef(null);
+      const isDraggingRef = useRef(false);
+
+      // 1. Load TensorFlow COCO-SSD Model
+      useEffect(() => {
+        if (window.cocoSsd) {
+          window.cocoSsd.load({ base: 'lite_mobilenet_v2' }).then(m => {
+            setModel(m);
+            setIsModelLoading(false);
+          }).catch(err => {
+            console.error('TF load error:', err);
+            setIsModelLoading(false);
+          });
+        }
+      }, []);
+
+      // Exponential Moving Average Bounding Box Smoothing
+      const smoothBBox = (newBBox, alpha = 0.35) => {
+        if (!smoothedBBoxRef.current) {
+          smoothedBBoxRef.current = [...newBBox];
+          return newBBox;
+        }
+        const [x, y, w, h] = newBBox;
+        const [sx, sy, sw, sh] = smoothedBBoxRef.current;
+        const smoothed = [
+          sx + alpha * (x - sx),
+          sy + alpha * (y - sy),
+          sw + alpha * (w - sw),
+          sh + alpha * (h - sh)
+        ];
+        smoothedBBoxRef.current = smoothed;
+        return smoothed;
+      };
+
+      // 2. Camera Controls
+      const startCamera = async (requestedFacingMode = facingMode) => {
+        setIsCameraLoading(true);
+        setCameraError(null);
+
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(t => t.stop());
+        }
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: requestedFacingMode }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+            audio: false
+          });
+          streamRef.current = stream;
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            await videoRef.current.play();
+          }
+          setIsCameraActive(true);
+          setFacingMode(requestedFacingMode);
+
+          // Check torch capability
+          const track = stream.getVideoTracks()[0];
+          if (track && track.getCapabilities) {
+            setIsTorchSupported(!!track.getCapabilities().torch);
+          }
+        } catch (e) {
+          console.error('Camera error:', e);
+          let errorMsg = 'Could not access camera.';
+          if (e.name === 'NotAllowedError') errorMsg = 'Camera permission denied. Please allow camera in browser settings.';
+          setCameraError(errorMsg);
+          setIsCameraActive(false);
+        } finally {
+          setIsCameraLoading(false);
+        }
+      };
+
+      const stopCamera = () => {
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(t => t.stop());
+        }
+        setIsCameraActive(false);
+        setDetectedObject(null);
+        setManualBox(null);
+        setIsLocked(false);
+      };
+
+      const toggleCamera = () => {
+        const nextMode = facingMode === 'environment' ? 'user' : 'environment';
+        startCamera(nextMode);
+      };
+
+      const toggleTorch = async () => {
+        if (!streamRef.current || !isTorchSupported) return;
+        const track = streamRef.current.getVideoTracks()[0];
+        if (track) {
+          try {
+            const nextState = !isTorchOn;
+            await track.applyConstraints({ advanced: [{ torch: nextState }] });
+            setIsTorchOn(nextState);
+          } catch (err) {}
+        }
+      };
+
+      // 3. AI Continuous Detection Loop
+      useEffect(() => {
+        if (!model || !isCameraActive || isLocked) return;
+
+        let active = true;
+        const detect = async () => {
+          if (!active) return;
+          const video = videoRef.current;
+          if (video && video.readyState === 4 && video.videoWidth > 0) {
+            try {
+              const predictions = await model.detect(video, 8, 0.45);
+              const food = predictions.filter(p => FOOD_CLASSES.includes(p.class));
+              if (food.length > 0) {
+                const top = food.reduce((prev, curr) => prev.score > curr.score ? prev : curr);
+                setDetectedObject({ ...top, bbox: smoothBBox(top.bbox) });
+              } else if (predictions.length > 0) {
+                setDetectedObject({ ...predictions[0], bbox: smoothBBox(predictions[0].bbox) });
+              } else {
+                setDetectedObject(null);
+                smoothedBBoxRef.current = null;
+              }
+            } catch (e) {}
+          }
+          if (active) requestRef.current = requestAnimationFrame(detect);
+        };
+        detect();
+
+        return () => {
+          active = false;
+          if (requestRef.current) cancelAnimationFrame(requestRef.current);
+        };
+      }, [model, isCameraActive, isLocked]);
+
+      // 4. Render AR Canvas Overlay
+      useEffect(() => {
+        let animId;
+        const render = () => {
+          const canvas = canvasRef.current;
+          const video = videoRef.current;
+          if (!canvas || !video || !isCameraActive) return;
+
+          const ctx = canvas.getContext('2d');
+          const rect = video.getBoundingClientRect();
+          const dpr = window.devicePixelRatio || 1;
+
+          if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+          }
+
+          ctx.save();
+          ctx.scale(dpr, dpr);
+          ctx.clearRect(0, 0, rect.width, rect.height);
+
+          const scaleX = rect.width / (video.videoWidth || rect.width);
+          const scaleY = rect.height / (video.videoHeight || rect.height);
+
+          let bbox = null;
+          let label = 'Cake';
+          let score = 0.95;
+
+          if (detectedObject && detectedObject.bbox) {
+            bbox = [
+              detectedObject.bbox[0] * scaleX,
+              detectedObject.bbox[1] * scaleY,
+              detectedObject.bbox[2] * scaleX,
+              detectedObject.bbox[3] * scaleY
+            ];
+            label = detectedObject.class;
+            score = detectedObject.score;
+          } else if (manualBox) {
+            bbox = [manualBox.x, manualBox.y, manualBox.w, manualBox.h];
+            label = 'Manual Target';
+            score = 1.0;
+          }
+
+          if (bbox) {
+            drawAROverlay(ctx, bbox, label, score, sliceCount, cutType, themeKey, isLocked);
+          }
+
+          ctx.restore();
+          animId = requestAnimationFrame(render);
+        };
+
+        if (isCameraActive) {
+          render();
+        } else if (canvasRef.current) {
+          const ctx = canvasRef.current.getContext('2d');
+          if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        }
+
+        return () => {
+          if (animId) cancelAnimationFrame(animId);
+        };
+      }, [isCameraActive, detectedObject, manualBox, sliceCount, cutType, themeKey, isLocked]);
+
+      // AR Drawing Math Function
+      const drawAROverlay = (ctx, bbox, label, score, sliceCount, cutType, themeKey, isLocked) => {
+        const theme = NEON_THEMES[themeKey] || NEON_THEMES.cyan;
+        const [x, y, w, h] = bbox;
+        const cx = x + w / 2;
+        const cy = y + h / 2;
+        const rx = w / 2;
+        const ry = h / 2;
+
+        ctx.shadowColor = theme.glow;
+        ctx.shadowBlur = 18;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = theme.stroke;
+        ctx.fillStyle = theme.fill;
+
+        // Outer shape boundary
+        ctx.beginPath();
+        if (cutType === 'radial') {
+          ctx.ellipse(cx, cy, rx, ry, 0, 0, 2 * Math.PI);
+        } else {
+          ctx.rect(x, y, w, h);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        // Corner Reticles
+        drawCornerReticles(ctx, x, y, w, h, theme.stroke);
+
+        // Tag Label Header
+        drawLabelTag(ctx, x, y, label, score, sliceCount, theme, isLocked);
+
+        // Cutting Lines
+        if (sliceCount > 1) {
+          ctx.shadowBlur = 12;
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([8, 6]);
+
+          if (cutType === 'radial') {
+            const angleStep = (2 * Math.PI) / sliceCount;
+            for (let i = 0; i < sliceCount; i++) {
+              const angle = i * angleStep - Math.PI / 2;
+              const px = cx + rx * Math.cos(angle);
+              const py = cy + ry * Math.sin(angle);
+              ctx.beginPath();
+              ctx.moveTo(cx, cy);
+              ctx.lineTo(px, py);
+              ctx.stroke();
+
+              // Numbers
+              const midAngle = angle + angleStep / 2;
+              const nx = cx + rx * 0.72 * Math.cos(midAngle);
+              const ny = cy + ry * 0.72 * Math.sin(midAngle);
+              drawBadge(ctx, i + 1, nx, ny, theme);
+            }
+          } else if (cutType === 'parallel') {
+            const step = w / sliceCount;
+            for (let i = 1; i < sliceCount; i++) {
+              ctx.beginPath();
+              ctx.moveTo(x + i * step, y);
+              ctx.lineTo(x + i * step, y + h);
+              ctx.stroke();
+            }
+            for (let i = 0; i < sliceCount; i++) {
+              drawBadge(ctx, i + 1, x + i * step + step / 2, y + h / 2, theme);
+            }
+          } else if (cutType === 'grid') {
+            const cols = Math.ceil(Math.sqrt(sliceCount));
+            const rows = Math.ceil(sliceCount / cols);
+            const colStep = w / cols;
+            const rowStep = h / rows;
+
+            for (let i = 1; i < cols; i++) {
+              ctx.beginPath();
+              ctx.moveTo(x + i * colStep, y);
+              ctx.lineTo(x + i * colStep, y + h);
+              ctx.stroke();
+            }
+            for (let j = 1; j < rows; j++) {
+              ctx.beginPath();
+              ctx.moveTo(x, y + j * rowStep);
+              ctx.lineTo(x + w, y + j * rowStep);
+              ctx.stroke();
+            }
+          }
+        }
+      };
+
+      const drawCornerReticles = (ctx, x, y, w, h, color) => {
+        const len = Math.min(18, w * 0.15);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(x, y + len); ctx.lineTo(x, y); ctx.lineTo(x + len, y);
+        ctx.moveTo(x + w - len, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + len);
+        ctx.moveTo(x, y + h - len); ctx.lineTo(x, y + h); ctx.lineTo(x + len, y + h);
+        ctx.moveTo(x + w - len, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - len);
+        ctx.stroke();
+      };
+
+      const drawLabelTag = (ctx, x, y, label, score, sliceCount, theme, isLocked) => {
+        const text = `${isLocked ? '🔒 LOCKED ' : ''}${label.toUpperCase()} (${Math.round(score * 100)}%) • ${sliceCount} PIECES`;
+        ctx.font = 'bold 12px Inter';
+        const tw = ctx.measureText(text).width;
+        const tagY = Math.max(10, y - 30);
+
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        ctx.strokeStyle = theme.stroke;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
+        ctx.fillRect(x, tagY, tw + 16, 24);
+        ctx.strokeRect(x, tagY, tw + 16, 24);
+
+        ctx.fillStyle = theme.stroke;
+        ctx.fillText(text, x + 8, tagY + 16);
+      };
+
+      const drawBadge = (ctx, num, cx, cy, theme) => {
+        ctx.save();
+        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        ctx.strokeStyle = theme.stroke;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 11, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 11px Inter';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(num.toString(), cx, cy);
+        ctx.restore();
+      };
+
+      // Pointer touch/drag manual target box
+      const handlePointerDown = (e) => {
+        if (!canvasRef.current) return;
+        const rect = canvasRef.current.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+        const clickY = e.clientY - rect.top;
+        isDraggingRef.current = true;
+        const size = Math.min(rect.width, rect.height) * 0.45;
+        setManualBox({ x: clickX - size / 2, y: clickY - size / 2, w: size, h: size });
+      };
+
+      // High-res photo snapshot
+      const takeSnapshot = () => {
+        const video = videoRef.current;
+        if (!video || !isCameraActive) return;
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth || 1280;
+        canvas.height = video.videoHeight || 720;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        if (canvasRef.current) {
+          ctx.drawImage(canvasRef.current, 0, 0, canvas.width, canvas.height);
+        }
+        const dataUrl = canvas.toDataURL('image/png');
+        const link = document.createElement('a');
+        link.download = `cake-cutter-${sliceCount}-pieces-${Date.now()}.png`;
+        link.href = dataUrl;
+        link.click();
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col justify-between p-4 max-w-5xl mx-auto space-y-4">
+          
+          {/* Header */}
+          <header className="flex items-center justify-between p-4 glass-panel rounded-2xl">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-pink-500 p-0.5 shadow-neon-cyan flex items-center justify-center text-xl">
+                🎂
+              </div>
+              <div>
+                <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-cyan-400 via-pink-400 to-yellow-300 bg-clip-text text-transparent">
+                  Cake Cutter <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800 font-mono">AR</span>
+                </h1>
+                <p className="text-xs text-slate-400 font-medium">Equal Portion AI Cutting Assistant</p>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-3">
+              <span className="hidden sm:inline-block text-xs font-semibold px-3 py-1.5 rounded-full glass-panel-subtle text-cyan-400">
+                {isModelLoading ? '⏳ Loading AI Model...' : '🟢 TensorFlow.js Ready'}
+              </span>
+              <button onClick={() => setIsHelpOpen(true)} className="p-2.5 rounded-xl glass-panel-subtle hover:bg-slate-800 text-cyan-400 font-bold text-sm">
+                ❓ Help
+              </button>
+            </div>
+          </header>
+
+          {/* Camera & Canvas Viewport */}
+          <div className="relative aspect-[4/3] sm:aspect-[16/9] bg-slate-950 rounded-3xl overflow-hidden border border-slate-800 shadow-2xl flex items-center justify-center">
+            <video ref={videoRef} playsInline autoPlay muted className={`w-full h-full object-cover ${isCameraActive ? 'block' : 'hidden'}`} />
+            <canvas ref={canvasRef} onPointerDown={handlePointerDown} className={`absolute inset-0 w-full h-full ${isCameraActive ? 'block cursor-crosshair' : 'hidden'}`} />
+
+            {isCameraActive && !detectedObject && !manualBox && (
+              <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-6">
+                <div className="w-full h-0.5 bg-gradient-to-r from-transparent via-cyan-400 to-transparent animate-scan shadow-neon-cyan" />
+                <div className="text-center">
+                  <span className="px-4 py-1.5 rounded-full glass-panel text-xs text-cyan-300 font-mono animate-pulse">
+                    Scanning for Cake / Pizza / Donut... (Tap screen to place target)
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {!isCameraActive && (
+              <div className="text-center p-6 max-w-md space-y-4">
+                <div className="relative inline-block cursor-pointer" onClick={() => startCamera()}>
+                  <div className="absolute -inset-4 rounded-full bg-gradient-to-r from-cyan-500 via-pink-500 to-yellow-400 opacity-50 blur-xl animate-pulse-slow" />
+                  <div className="relative w-24 h-24 rounded-3xl bg-slate-900 border border-slate-700 flex items-center justify-center text-5xl shadow-2xl">
+                    🎂
+                  </div>
+                </div>
+                <h2 className="text-2xl font-extrabold text-white">Equal Slices Made Easy</h2>
+                <p className="text-xs sm:text-sm text-slate-400">
+                  Point your camera at any cake, pie, or pizza. Browser AI auto-detects your food and overlays exact portion lines live.
+                </p>
+
+                {cameraError ? (
+                  <p className="p-3 rounded-xl bg-rose-950/80 text-rose-300 text-xs font-semibold">{cameraError}</p>
+                ) : (
+                  <button onClick={() => startCamera()} disabled={isCameraLoading} className="py-3 px-8 rounded-2xl bg-gradient-to-r from-cyan-400 via-teal-400 to-emerald-400 text-slate-950 font-extrabold text-base shadow-neon-cyan hover:scale-105 transition-all">
+                    {isCameraLoading ? 'Starting Camera...' : '📷 Start Camera'}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Controls Bar */}
+          <div className="p-4 glass-panel rounded-3xl space-y-3">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-900/60 p-3 rounded-2xl border border-slate-800">
+              
+              {/* Portion Counter */}
+              <div className="flex items-center space-x-3 w-full sm:w-auto justify-between">
+                <span className="text-xs font-bold text-slate-300 uppercase">Pieces:</span>
+                <div className="flex items-center space-x-2">
+                  <button onClick={() => setSliceCount(Math.max(2, sliceCount - 1))} className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-400 font-bold">-</button>
+                  <input type="number" min="2" max="32" value={sliceCount} onChange={(e) => setSliceCount(Math.max(2, Math.min(32, parseInt(e.target.value) || 2)))} className="w-14 h-9 bg-slate-950 text-center font-bold text-cyan-400 rounded-xl border border-cyan-500/50 font-mono" />
+                  <button onClick={() => setSliceCount(Math.min(32, sliceCount + 1))} className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-400 font-bold">+</button>
+                </div>
+              </div>
+
+              {/* Quick Presets */}
+              <div className="flex items-center space-x-1.5">
+                {[2, 3, 4, 6, 8, 12, 16].map(num => (
+                  <button key={num} onClick={() => setSliceCount(num)} className={`px-2.5 py-1 rounded-lg text-xs font-bold font-mono transition-all ${sliceCount === num ? 'bg-cyan-500 text-slate-950 shadow-neon-cyan' : 'bg-slate-800 text-slate-300'}`}>
+                    {num}
+                  </button>
+                ))}
+              </div>
+
+              {/* Cut Style */}
+              <div className="flex items-center space-x-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                <button onClick={() => setCutType('radial')} className={`px-3 py-1 rounded-lg text-xs font-bold ${cutType === 'radial' ? 'bg-cyan-500 text-slate-950' : 'text-slate-400'}`}>🍕 Radial</button>
+                <button onClick={() => setCutType('parallel')} className={`px-3 py-1 rounded-lg text-xs font-bold ${cutType === 'parallel' ? 'bg-cyan-500 text-slate-950' : 'text-slate-400'}`}>⏸️ Strips</button>
+                <button onClick={() => setCutType('grid')} className={`px-3 py-1 rounded-lg text-xs font-bold ${cutType === 'grid' ? 'bg-cyan-500 text-slate-950' : 'text-slate-400'}`}>🎂 Grid</button>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-between gap-2">
+              {!isCameraActive ? (
+                <button onClick={() => startCamera()} className="flex-1 py-3 rounded-2xl bg-gradient-to-r from-cyan-400 to-teal-400 text-slate-950 font-bold text-sm shadow-neon-cyan">
+                  📷 Start Camera
+                </button>
+              ) : (
+                <button onClick={stopCamera} className="flex-1 py-3 rounded-2xl bg-rose-600/90 text-white font-bold text-sm">
+                  🛑 Stop Camera
+                </button>
+              )}
+
+              {isCameraActive && (
+                <div className="flex items-center space-x-2">
+                  <button onClick={toggleCamera} className="p-3 rounded-2xl glass-panel-subtle text-cyan-400" title="Flip Camera">🔄</button>
+                  {isTorchSupported && <button onClick={toggleTorch} className={`p-3 rounded-2xl ${isTorchOn ? 'bg-amber-500 text-black' : 'glass-panel-subtle text-white'}`}>⚡</button>}
+                  <button onClick={() => setIsLocked(!isLocked)} className={`p-3 rounded-2xl ${isLocked ? 'bg-pink-600 text-white shadow-neon-pink' : 'glass-panel-subtle text-white'}`} title="Lock Target Position">
+                    {isLocked ? '🔒' : '🔓'}
+                  </button>
+                  <button onClick={takeSnapshot} className="p-3 rounded-2xl bg-gradient-to-r from-purple-500 to-pink-500 text-white" title="Save Photo Snapshot">📸</button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Help Modal */}
+          {isHelpOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+              <div className="w-full max-w-md glass-panel rounded-3xl p-6 space-y-4 border border-slate-700">
+                <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+                  <h3 className="font-bold text-white text-lg">How to Use Cake Cutter AR</h3>
+                  <button onClick={() => setIsHelpOpen(false)} className="text-slate-400 font-bold">✕</button>
+                </div>
+                <div className="space-y-3 text-xs text-slate-300">
+                  <p>1. <strong>Set Pieces:</strong> Choose number of pieces (e.g., 6 or 8) and cut style (Radial 🍕 or Grid 🎂).</p>
+                  <p>2. <strong>Start Camera:</strong> Allow camera access and point your phone top-down at your food.</p>
+                  <p>3. <strong>Auto AI & Manual Touch:</strong> TensorFlow AI will detect the cake automatically. If not detected, simply tap the screen to place a manual overlay circle!</p>
+                  <p>4. <strong>Lock & Save:</strong> Tap 🔒 to lock the overlay position or 📸 to save a high-res screenshot.</p>
+                </div>
+                <button onClick={() => setIsHelpOpen(false)} className="w-full py-2.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs">Got it!</button>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
 </html>
